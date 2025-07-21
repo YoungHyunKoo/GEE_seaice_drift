@@ -9,7 +9,7 @@ import h5py
 import datetime as dt
 import pyproj
 from tqdm import tqdm
-from pyproj import Proj, transform
+from pyproj import Proj, transform, Transformer
 from shapely.geometry import Polygon
 import cartopy.crs as ccrs
 from netCDF4 import date2num,num2date
@@ -230,8 +230,8 @@ def retrieve_hourly_ERA5_bbox(year, months, days, bbox):
     # flag to download data
     # download_flag = False
     variables = [
-        '10m_u_component_of_wind', '10m_v_component_of_wind', 'instantaneous_10m_wind_gust'
-        # '2m_temperature', 'sea_ice_cover', 'surface_pressure', 'skin_temperature'
+        '10m_u_component_of_wind', '10m_v_component_of_wind', '2m_temperature', 'sea_ice_cover'
+        # '2m_temperature', 'sea_ice_cover', 'surface_pressure', 'skin_temperature', 'instantaneous_10m_wind_gust', 
     ]
     times = ['00:00', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00', '21:00']
     # api parameters 
@@ -656,12 +656,17 @@ def prepare_array(img):
     img = get_uint8_image(img, None, None, 1, 99)
     return img
 
-def derive_drift(a1, a2, t2, t1, pixel_size, directory = "D:\\Landfast\\ice_vel", velocity = True, pm_step = 40):
+def derive_drift(a1, a2, t2, t1, extent_coords, pixel_size, directory = "D:\\Landfast\\ice_vel", velocity = True, pm_step = 40):
     a1 = prepare_array(a1)
     a2 = prepare_array(a2)
 
     t1_str = t1.strftime("%Y%m%dT%H%M%S")
     t2_str = t2.strftime("%Y%m%dT%H%M%S")
+
+    xmax = extent_coords[:, 0].max()
+    xmin = extent_coords[:, 0].min()
+    ymax = extent_coords[:, 1].max()
+    ymin = extent_coords[:, 1].min()
     
     dsec = abs(t2-t1).total_seconds()/3600 # seconds to hour
     # print("Time difference (seconds): ", dsec)
@@ -673,7 +678,7 @@ def derive_drift(a1, a2, t2, t1, pixel_size, directory = "D:\\Landfast\\ice_vel"
     
     rows, cols = a1.shape
 
-    d = Domain(srs.wkt, f'-te 0 0 {cols*pixel_size} {rows*pixel_size} -ts {cols} {rows}')
+    d = Domain(srs.wkt, f'-te {xmin} {ymin} {xmax} {ymax} -ts {cols} {rows}')
     n1 = Nansat.from_domain(d, a1)
     n2 = Nansat.from_domain(d, a2)
     c1, r1, c2, r2 = feature_tracking(n1, n2, nFeatures=20000, ratio_test=0.7, max_drift=40000, verbose=False)
@@ -703,7 +708,7 @@ def derive_drift(a1, a2, t2, t1, pixel_size, directory = "D:\\Landfast\\ice_vel"
         x1pm, y1pm = d.get_geolocation_grids(pm_step, dst_srs=srs)
 
         ### SAVE AS PICKLE =======================================================
-        pkl_object = [upm, vpm, apm, rpm, hpm, lon2pm, lat2pm]
+        pkl_object = [upm, vpm, apm, rpm, hpm, x1pm, y1pm]
         # pkl_name = f"{directory}\\S1_vel_{t1_str}_{t2_str}.pkl"
         # with open(pkl_name, 'wb') as handle:
         #     pickle.dump(pkl_object, handle)
@@ -712,4 +717,26 @@ def derive_drift(a1, a2, t2, t1, pixel_size, directory = "D:\\Landfast\\ice_vel"
     else:
         # print("Failed!")
         return []
-        
+
+def appropriate_resolution(center, pixel_size):
+    # center: [lon, lat]
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3409")
+    x0, y0 = transformer.transform(center[1], center[0])
+
+    x1 = x0 + pixel_size; y1 = y0
+    x2 = x0; y2 = y0 + pixel_size
+    x3 = x0 + pixel_size; y3 = y0 + pixel_size
+    
+    x = np.array([x0, x1, x2, x3])
+    y = np.array([y0, y1, y2, y3])
+    
+    transformer = Transformer.from_crs("EPSG:3408", "EPSG:3857")
+    xc, yc = transformer.transform(x, y)
+    
+    d1 = ((xc[0]-xc[1])**2 + (yc[0]-yc[1])**2)**0.5
+    d2 = ((xc[0]-xc[2])**2 + (yc[0]-yc[2])**2)**0.5
+    d3 = ((xc[0]-xc[3])**2 + (yc[0]-yc[3])**2)**0.5
+    
+    dp = np.round(np.mean([d1, d2, d3]), 0)
+    return dp
+
